@@ -1,0 +1,36 @@
+function recordMotionData() {
+
+  const deviceData = getNatureRemoData("devices");
+  const sheet = getSheet('sensor');
+
+  const lastRow = sheet.getLastRow();
+
+  var mo_last =
+    deviceData[0].newest_events.mo.created_at;
+
+
+  var previous_mo_last = "";
+
+  for (var i = lastRow; i >= 2; i--) {
+
+    var value = sheet.getRange(i, 6).getValue();
+
+    if (value != "") {
+      previous_mo_last = value;
+      break;
+    }
+  }
+
+  if (previous_mo_last != mo_last) {
+
+    sheet.getRange(lastRow + 1, 1, 1, 6)
+      .setValues([[
+        new Date(), 
+        "",         
+        "",         
+        "",         
+        1,          
+        mo_last     
+      ]]);
+  }
+}
