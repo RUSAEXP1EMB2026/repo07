@@ -1,0 +1,302 @@
+// --- 設定値 ---
+const LINE_TOKEN = 'LINEトークン';
+const REMO_TOKEN = 'れもトークン';
+const SHEET_NAME = 'シートのトークン’;
+
+/**
+ * LINEからの受信（Webhook）
+ */
+function doPost(e) {
+  if (typeof e === 'undefined') {
+    console.log("エディタから実行されました。テスト用データを使います。");
+    e = { postData: { contents: JSON.stringify({ events: [] }) } };
+  }
+  const event = JSON.parse(e.postData.contents).events[0];
+  const replyToken = event.replyToken;
+  const userMsg = event.message.text;
+  let messageText = "";
+
+  // 1. 温度設定（「温度 28」や数字のみに対応）
+  if (userMsg.includes("温度") || (!isNaN(userMsg) && userMsg !== "")) {
+    const tempValue = userMsg.replace(/[^0-9.]/g, ""); 
+    if (tempValue) {
+      updateSettings('temp', tempValue);
+      messageText = `設定温度を ${tempValue}℃ に更新したワン！`;
+    }
+  } 
+  // 2. 湿度設定（「湿度 60」に対応）
+  else if (userMsg.includes("湿度")) {
+    const humiValue = userMsg.replace(/[^0-9.]/g, "");
+    if (humiValue) {
+      updateSettings('humi', humiValue);
+      messageText = `設定湿度を ${humiValue}% に更新したワン！`;
+    }
+  } 
+  // 3. 状態確認
+  else if (userMsg === "今の状態" || userMsg === "不快指数") {
+    messageText = generateStatusMessage();
+  } 
+  else {
+    messageText = `「今の状態」と聞くか、「温度 28」や「湿度 60」のように送ってほしいワン！`;
+  }
+
+  replyToLine(replyToken, messageText);
+}
+
+/**
+ * 【自動実行用】1時間に1回、LINEに現在の状態をプッシュ通知する関数
+ */
+function sendHourlyUpdate() {
+  // 状態メッセージを作成
+  const messageText = "📢【1時間おきのパトロール報告】\n\n" + generateStatusMessage();
+
+  // LINEの「ブロードキャスト」機能を使って自分（全員）に送信
+  const url = 'https://api.line.me/v2/bot/message/broadcast';
+  UrlFetchApp.fetch(url, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_TOKEN,
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'messages': [{ 'type': 'text', 'text': messageText }],
+    }),
+  });
+}
+
+/**
+ * スプレッドシート保存（温度・湿度・状態・時刻）
+ */
+function updateSettings(type, value) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  const now = new Date();
+  
+  if (type === 'temp') {
+    sheet.getRange("B1").setValue(value);
+    sheet.getRange("B4").setValue(now);
+  } else if (type === 'humi') {
+    sheet.getRange("B5").setValue(value);
+    sheet.getRange("B4").setValue(now);
+  } else if (type === 'status') {
+    sheet.getRange("B3").setValue(value);
+  }
+}
+
+/**
+ * メッセージ作成（設定値とエアコン状態も表示）
+ */
+function generateStatusMessage() {
+  const data = getRemoData();
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  const setTemp = sheet.getRange("B1").getValue();
+  const setHumi = sheet.getRange("B5").getValue();
+  const airconStatus = sheet.getRange("B3").getValue() || "未設定";
+
+  // 不快指数の計算
+  const di = 0.81 * data.temp + 0.01 * data.hu * (0.99 * data.temp - 14.3) + 46.3;
+
+  // ワンちゃん目線の判定ロジック
+  let status = "";
+  let advice = "";
+  if (di >= 80) {
+    status = "🚨【厳戒態勢】命の危険！";
+    advice = "すぐにエアコンをフル稼働させて！";
+  } else if (di >= 75) {
+    status = "⚠️【警告】かなり暑いワン";
+    advice = "冷房を強めてほしいな。";
+  } else if (di >= 70) {
+    status = "🐾【注意】少しムシムシする";
+    advice = "除湿してくれると助かるワン。";
+  } else if (di >= 60) {
+    status = "✨【快適】最高！";
+    advice = "ちょうどいいよ！";
+  } else {
+    status = "❄️【肌寒い】ちょっと寒いかも";
+    advice = "毛布を準備してくれると嬉しいな。";
+  }
+
+  // 報告テキストの組み立て
+  return `🌡 室温：${data.temp}℃ (設定：${setTemp}℃)\n` +
+         `💧 湿度：${data.hu}% (設定：${setHumi}%)\n` +
+         `🤖 エアコン：${airconStatus}\n` +
+         `✨ 不快指数：${di.toFixed(1)}\n\n` +
+         `🐶 判定：${status}\n` +
+         `💬 ${advice}`;
+}
+
+
+/**
+ * Nature Remoからデータを取得
+ */
+function getRemoData() {
+  const response = UrlFetchApp.fetch("https://api.nature.global/1/devices", {
+    'headers': { 'Authorization': 'Bearer ' + REMO_TOKEN }
+  });
+  const json = JSON.parse(response.getContentText());
+  return {
+    temp: json[0].newest_events.te.val,
+    hu: json[0].newest_events.hu.val
+  };
+}
+
+/**
+ * LINE返信用共通関数
+ */
+function replyToLine(token, text) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+  UrlFetchApp.fetch(url, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_TOKEN,
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'replyToken': token,
+      'messages': [{ 'type': 'text', 'text': text }],
+    }),
+  });
+}
+
+
+  /**
+ * 自動監視用（トリガーで実行）
+ * 温度または不快指数が閾値を超えたらエアコンをオンにする
+ */
+function checkAndControlAircon() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  // スプレッドシートから各基準値を取得
+  const thresholdTemp = sheet.getRange('B1').getValue(); // 温度しきい値
+  const thresholdDI   = sheet.getRange('B2').getValue(); // 不快指数しきい値
+  const currentStatus = sheet.getRange('B3').getValue(); // 現在のエアコン状態
+  const threshoHumi = sheet.getRange("B5").
+  getValue();
+
+  // Remoから現在の部屋のデータを取得
+  const data = getRemoData(); 
+  
+  // 不快指数の計算
+  const di = 0.81 * data.temp + 0.01 * data.hu * (0.99 * data.temp - 14.3) + 46.3;
+  
+  // 判定フラグ（温度が基準以上、または不快指数が基準以上）
+  const isTooHot = data.temp >= thresholdTemp;
+  const isUncomfortable = di >= thresholdDI;
+
+  console.log(`現在地 - 温度: ${data.temp} (閾値: ${thresholdTemp}), 不快指数: ${di.toFixed(1)} (閾値: ${thresholdDI})`);
+
+  // もし「温度」または「不快指数」のどちらかが閾値を超えたら
+  if (isTooHot || isUncomfortable) {
+    
+    // まだ稼働中でない場合のみエアコンをONにする
+    if (currentStatus !== '稼働中') {
+      turnOnAircon(); 
+      updateSettings('status', '稼働中');
+      
+      // 通知用メッセージの作成
+      let reason = isTooHot ? `温度が${data.temp}℃` : `不快指数が${di.toFixed(1)}`;
+      const msg = `🐶【自動冷房オン】\n${reason}になったため、エアコンをつけました！\n(設定：温度${thresholdTemp}℃ / 不快指数${thresholdDI})`;
+      
+      sendToLineNotify(msg);
+    }
+  } else {
+    // どちらも基準以下の場合は「停止中」に更新
+    if (currentStatus === '稼働中') {
+       updateSettings('status', '停止中');
+       sendToLineNotify("🐾【報告】室温が落ち着いたので、ステータスを停止中に戻したワン。");
+    }
+  }
+}
+
+function turnOnAircon() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  // B4セルから値を取得
+  let targetValue = sheet.getRange('B1').getValue();
+  const targetTemp = Math.floor(Number(targetValue)); 
+
+  // 【安全装置】温度が異常（例: IDが混入）な場合は実行しない
+  if (targetTemp < 16 || targetTemp > 30) {
+    console.error("エラー：B1セルの値が異常です（" + targetValue + "）。ここには25などの温度を入れてください。");
+    // LINEにも警告を送ると親切です
+    sendToLineNotify("⚠️スプレッドシートのB4セルが温度（16〜30）になっていません！設定を確認してください。");
+    return; 
+  }
+
+  const APPLIANCE_ID = 'エアコンのID’; // ここに長いIDを貼る
+  
+  const url = `https://api.nature.global/1/appliances/${APPLIANCE_ID}/aircon_settings`;
+  
+  const options = {
+    'method': 'post',
+    'headers': {
+      'Authorization': 'Bearer ' + REMO_TOKEN
+    },
+    'payload': {
+      'temperature': targetTemp.toString(),
+      'operation_mode': 'cool', 
+      'air_volume': 'auto' 
+    }
+  };
+
+  UrlFetchApp.fetch(url, options);
+  console.log(`🌟 冷房 ${targetTemp}度 で起動しました。`);
+}
+/**
+ * LINE Notifyにメッセージを送信する関数
+ * これがないと「sendToLineNotify is not defined」エラーになります
+ */
+function sendToLineNotify(message) {
+  // LINE Notifyのトークン（以前取得したもの）
+  const token = "sNIlF2ZsM+5EPxax/rtI9FqAyEURdb1VGPBSLpetITezA0szt0n1hJaZkCES1PNGZYpjBMEtbwEsjdeaK00yXPfhZADvZs+ufCAmc+74fJZbDw6HwBl5Tn4hzIlsawLOqkGGG70Z4SS99uFzVc/7kgdB04t89/1O/w1cDnyilFU="; 
+  
+  const url = "https://notify-api.line.me/api/notify";
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Bearer " + token
+    },
+    "payload": {
+      "message": message
+    }
+  };
+
+  try {
+    UrlFetchApp.fetch(url, options);
+    console.log("LINEに通知を飛ばしました。");
+  } catch (e) {
+    console.error("LINE送信エラー: " + e.message);
+  }
+}
+/**
+ * 1分おきにGmailを監視し、QwatchからのメールがあればLINEへ飛ばす
+ */
+function checkQwatchAndNotify() {
+  // 件名が「Qwatch検知」で、まだ読んでいないメールを検索
+  const query = 'subject:"Qwatch検知" is:unread';
+  const threads = GmailApp.search(query);
+
+  if (threads.length === 0) return; // メールがなければ終了
+
+  // QwatchViewアプリを起動するリンク（iPhone用）
+  const cameraUrl = "qwatchview://"; 
+
+  for (const thread of threads) {
+    const messages = thread.getMessages();
+    const lastMessage = messages[messages.length - 1];
+    const timeStr = Utilities.formatDate(lastMessage.getDate(), "JST", "HH:mm:ss");
+    
+    // LINEに送るメッセージ内容
+    const messageText = `🚨【Qwatch センサー検知】\n\n人感センサーが反応したワン！🐶\n時刻: ${timeStr}\n\n👇ここをタップしてアプリを起動！\n${cameraUrl}`;
+
+    // LINEに送信（既存の関数を再利用）
+    sendLineBroadcast(messageText);
+
+    // 処理済みとして既読にする（これ重要！）
+    thread.markRead();
+  }
+}
