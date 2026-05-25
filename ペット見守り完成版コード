@@ -1,0 +1,396 @@
+// --- 設定値 ---
+const LINE_TOKEN = 'v6j5Uzoz/+Q0PXgXvwlnCUqxu4WSFjPxDshsyhSvexCwVU4m1z2XHTNrpuiXGRSsutX5x2XGlK8vcZplk6w4o1eL3vrDmCzbU1Op0UI3QkRRiVDSI832X9pTil9A8hCY/8mKUx6ZiFyFOnU39HrpcQdB04t89/1O/w1cDnyilFU=';
+const REMO_TOKEN = 'ory_at_AqegtlyItfMRHmC5ZTY7e4QCfhPWKamY4R-1Sb5v54o.TJDNKhMNinQwYoe6U_ftOm2E0FgKB8FrA6TE0pROc-o';
+const SHEET_ID   = '1glH2gYnZL9MtrTSLkEMwESxZBIt6wnZxjlwr44ETPZs';
+const SHEET_NAME = 'Temp Settings Sheet';
+
+/**
+ * LINEからの受信（Webhook）
+ */
+function doPost(e) {
+  if (typeof e === 'undefined') {
+    console.log("エディタから実行されました。テスト用データを使います。");
+    e = { postData: { contents: JSON.stringify({ events: [] }) } };
+  }
+  const event = JSON.parse(e.postData.contents).events[0];
+  const replyToken = event.replyToken;
+  const userMsg = event.message.text;
+  let messageText = "";
+
+  // 1. 温度設定（「温度 28」や数字のみに対応）
+  if (userMsg.includes("温度") || (!isNaN(userMsg) && userMsg !== "")) {
+    const tempValue = userMsg.replace(/[^0-9.]/g, ""); 
+    if (tempValue) {
+      updateSettings('temp', tempValue);
+      messageText = `設定温度を ${tempValue}℃ に更新したワン！`;
+    }
+  } 
+  // 2. 湿度設定（「湿度 60」に対応）
+  else if (userMsg.includes("湿度")) {
+    const humiValue = userMsg.replace(/[^0-9.]/g, "");
+    if (humiValue) {
+      updateSettings('humi', humiValue);
+      messageText = `設定湿度を ${humiValue}% に更新したワン！`;
+    }
+  } 
+  // 3. 状態確認
+  else if (userMsg === "今の状態" || userMsg === "不快指数") {
+    messageText = generateStatusMessage();
+  } 
+  else {
+    messageText = `「今の状態」と聞くか、「温度 28」や「湿度 60」のように送ってほしいワン！`;
+  }
+
+  replyToLine(replyToken, messageText);
+}
+
+/**
+ * 【自動実行用】1時間に1回、LINEに現在の状態をプッシュ通知する関数
+ */
+function sendHourlyUpdate() {
+  // 状態メッセージを作成
+  const messageText = "📢【1時間おきのパトロール報告】\n\n" + generateStatusMessage();
+
+  // LINEの「ブロードキャスト」機能を使って自分（全員）に送信
+  const url = 'https://api.line.me/v2/bot/message/broadcast';
+  UrlFetchApp.fetch(url, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_TOKEN,
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'messages': [{ 'type': 'text', 'text': messageText }],
+    }),
+  });
+}
+
+/**
+ * スプレッドシート保存（温度・湿度・状態・時刻）
+ */
+function updateSettings(type, value) {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  const now = new Date();
+  
+  if (type === 'temp') {
+    sheet.getRange("B1").setValue(value);
+    sheet.getRange("B4").setValue(now);
+  } else if (type === 'humi') {
+    sheet.getRange("B5").setValue(value);
+    sheet.getRange("B4").setValue(now);
+  } else if (type === 'status') {
+    sheet.getRange("B3").setValue(value);
+  }
+}
+
+/**
+ * メッセージ作成（設定値とエアコン状態も表示）
+ */
+function generateStatusMessage() {
+  const data = getRemoData();
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  const setTemp = sheet.getRange("B1").getValue();
+  const setHumi = sheet.getRange("B5").getValue();
+  const airconStatus = sheet.getRange("B3").getValue() || "未設定";
+
+  // 不快指数の計算
+  const di = 0.81 * data.temp + 0.01 * data.hu * (0.99 * data.temp - 14.3) + 46.3;
+
+  // ワンちゃん目線の判定ロジック
+  let status = "";
+  let advice = "";
+  if (di >= 80) {
+    status = "🚨【厳戒態勢】命の危険！";
+    advice = "すぐにエアコンをフル稼働させて！";
+  } else if (di >= 75) {
+    status = "⚠️【警告】かなり暑いワン";
+    advice = "冷房を強めてほしいな。";
+  } else if (di >= 70) {
+    status = "🐾【注意】少しムシムシする";
+    advice = "除湿してくれると助かるワン。";
+  } else if (di >= 60) {
+    status = "✨【快適】最高！";
+    advice = "ちょうどいいよ！";
+  } else {
+    status = "❄️【肌寒い】ちょっと寒いかも";
+    advice = "毛布を準備してくれると嬉しいな。";
+  }
+
+  // 報告テキストの組み立て
+  return `🌡 室温：${data.temp}℃ (設定：${setTemp}℃)\n` +
+         `💧 湿度：${data.hu}% (設定：${setHumi}%)\n` +
+         `🤖 エアコン：${airconStatus}\n` +
+         `✨ 不快指数：${di.toFixed(1)}\n\n` +
+         `🐶 判定：${status}\n` +
+         `💬 ${advice}`;
+}
+
+
+/**
+ * Nature Remoからデータを取得
+ */
+function getRemoData() {
+  const response = UrlFetchApp.fetch("https://api.nature.global/1/devices", {
+    'headers': { 'Authorization': 'Bearer ' + REMO_TOKEN }
+  });
+  const json = JSON.parse(response.getContentText());
+  return {
+    temp: json[0].newest_events.te.val,
+    hu: json[0].newest_events.hu.val
+  };
+}
+
+/**
+ * LINE返信用共通関数
+ */
+function replyToLine(token, text) {
+  const url = 'https://api.line.me/v2/bot/message/reply';
+  UrlFetchApp.fetch(url, {
+    'headers': {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_TOKEN,
+    },
+    'method': 'post',
+    'payload': JSON.stringify({
+      'replyToken': token,
+      'messages': [{ 'type': 'text', 'text': text }],
+    }),
+  });
+}
+
+
+/**
+ * 【新規追加】Nature Remoから実際のエアコン状態（ON/OFF）を取得する関数
+ */
+function syncAirconStatus() {
+  try {
+    const url = "https://api.nature.global/1/appliances";
+    const response = UrlFetchApp.fetch(url, {
+      'headers': { 'Authorization': 'Bearer ' + REMO_TOKEN }
+    });
+    const appliances = JSON.parse(response.getContentText());
+    
+    // ご自身のエアコンのID
+    const targetId = 'e3b5bb4e-9f05-4d17-8c0c-8b23d5cdee10';
+    const aircon = appliances.find(a => a.id === targetId);
+    
+    if (aircon) {
+      // Nature Remoの仕様: 停止中は button が 'power-off' になる
+      const isOff = (aircon.settings.button === 'power-off');
+      return isOff ? '停止中' : '稼働中';
+    }
+  } catch (e) {
+    console.error("エアコン状態同期エラー: " + e.message);
+  }
+  return null;
+}
+
+/**
+ * 自動監視用（トリガーで実行）
+ * 暑ければエアコンをオン、既に稼働中ならスキップ、手動停止も検知
+ */
+function checkAndControlAircon() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  const thresholdTemp = sheet.getRange('B1').getValue(); 
+  const thresholdDI   = sheet.getRange('B2').getValue(); 
+  let currentStatus   = sheet.getRange('B3').getValue(); 
+  
+  // ① Remoの実際の状態を取得し、スプレッドシートとズレていたら上書きする（リモコン停止対策）
+  const realStatus = syncAirconStatus();
+  if (realStatus && realStatus !== currentStatus) {
+    currentStatus = realStatus;
+    updateSettings('status', currentStatus);
+    console.log(`シートの状態をRemoの実際の状態（${currentStatus}）に同期しました。`);
+  }
+
+  const data = getRemoData(); 
+  const di = 0.81 * data.temp + 0.01 * data.hu * (0.99 * data.temp - 14.3) + 46.3;
+  
+  const isTooHot = data.temp >= thresholdTemp;
+  const isUncomfortable = di >= thresholdDI;
+
+  // ② 基準を超えている場合
+  if (isTooHot || isUncomfortable) {
+    
+    // ③ 「現在停止中」の場合のみ、エアコンを起動してLINEに通知（連続送信をストップ）
+    if (currentStatus !== '稼働中') {
+      turnOnAircon(); 
+      updateSettings('status', '稼働中'); 
+      
+      let reason = isTooHot ? `温度が${data.temp}℃` : `不快指数が${di.toFixed(1)}`;
+      const msg = `🐶【自動冷房オン】\n${reason}になったため、エアコンをつけました！\n(設定：温度${thresholdTemp}℃ / 不快指数${thresholdDI})`;
+      
+      // ④ Qwatchの通知と同じ公式アカウントに送信する
+      sendLineBroadcast(msg);
+    }
+  }
+}
+
+function turnOnAircon() {
+  const ss = SpreadsheetApp.openById(SHEET_ID);
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  
+  // B4セルから値を取得
+  let targetValue = sheet.getRange('B1').getValue();
+  const targetTemp = Math.floor(Number(targetValue)); 
+
+  // 【安全装置】温度が異常（例: IDが混入）な場合は実行しない
+  if (targetTemp < 16 || targetTemp > 30) {
+    console.error("エラー：B1セルの値が異常です（" + targetValue + "）。ここには25などの温度を入れてください。");
+    // LINEにも警告を送ると親切です
+    sendToLineNotify("⚠️スプレッドシートのB4セルが温度（16〜30）になっていません！設定を確認してください。");
+    return; 
+  }
+
+  const APPLIANCE_ID = 'e3b5bb4e-9f05-4d17-8c0c-8b23d5cdee10'; // ここに長いIDを貼る
+  
+  const url = `https://api.nature.global/1/appliances/${APPLIANCE_ID}/aircon_settings`;
+  
+  const options = {
+    'method': 'post',
+    'headers': {
+      'Authorization': 'Bearer ' + REMO_TOKEN
+    },
+    'payload': {
+      'temperature': targetTemp.toString(),
+      'operation_mode': 'cool', 
+      'air_volume': 'auto' 
+    }
+  };
+
+  UrlFetchApp.fetch(url, options);
+  console.log(`🌟 冷房 ${targetTemp}度 で起動しました。`);
+}
+/**
+ * LINE Notifyにメッセージを送信する関数
+ * これがないと「sendToLineNotify is not defined」エラーになります
+ */
+function sendToLineNotify(message) {
+  // LINE Notifyのトークン（以前取得したもの）
+  const token = "sNIlF2ZsM+5EPxax/rtI9FqAyEURdb1VGPBSLpetITezA0szt0n1hJaZkCES1PNGZYpjBMEtbwEsjdeaK00yXPfhZADvZs+ufCAmc+74fJZbDw6HwBl5Tn4hzIlsawLOqkGGG70Z4SS99uFzVc/7kgdB04t89/1O/w1cDnyilFU="; 
+  
+  const url = "https://notify-api.line.me/api/notify";
+  const options = {
+    "method": "post",
+    "headers": {
+      "Authorization": "Bearer " + token
+    },
+    "payload": {
+      "message": message
+    }
+  };
+
+  try {
+    UrlFetchApp.fetch(url, options);
+    console.log("LINEに通知を飛ばしました。");
+  } catch (e) {
+    console.error("LINE送信エラー: " + e.message);
+  }
+}
+/**
+ * 【画像対応版】Gmailを監視してテキストと写真をLINEへ飛ばす
+ */
+function checkQwatchAndNotify() {
+  // 件名の条件（実際のメールに合わせて変更してください）
+  const query = '人感 is:unread'; 
+  const threads = GmailApp.search(query);
+
+  if (threads.length === 0) return;
+
+  // iPhone用のApp Storeリンク（必要に応じて変更）
+  const cameraUrl = "https://youtube.com/live/YB73KF4pL98?feature=share";
+
+  for (const thread of threads) {
+    const messages = thread.getMessages();
+    const lastMessage = messages[messages.length - 1];
+    const timeStr = Utilities.formatDate(lastMessage.getDate(), "JST", "HH:mm:ss");
+    
+    // LINEに送るメッセージの配列（リスト）を準備
+    let replyMessages = [];
+
+    // ① テキストメッセージをセット
+    const messageText = `🚨【Qwatch センサー検知】\n\n人感センサーが反応したワン！🐶\n時刻: ${timeStr}\n\n👇アプリを起動\n${cameraUrl}`;
+    replyMessages.push({ 'type': 'text', 'text': messageText });
+
+    // ② 添付ファイル（写真）があれば処理する
+    const attachments = lastMessage.getAttachments();
+    if (attachments.length > 0) {
+      try {
+        // 画像をGoogleドライブ（マイドライブの一番上）に保存
+        const blob = attachments[0].copyBlob();
+        const file = DriveApp.createFile(blob);
+        
+        // LINEから画像を読み込めるように「リンクを知っている全員」に権限を変更
+        file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        
+        // LINE用のダウンロードURLを生成
+        const imageUrl = "https://drive.google.com/uc?export=download&id=" + file.getId();
+        
+        // 画像メッセージをセット
+        replyMessages.push({
+          'type': 'image',
+          'originalContentUrl': imageUrl,
+          'previewImageUrl': imageUrl
+        });
+      } catch (e) {
+        console.error("画像処理エラー: " + e.message);
+      }
+    }
+
+    // LINEに一括送信（テキスト＋画像の2件が同時に送られます）
+    sendLineBroadcastAdvanced(replyMessages);
+    
+    // 既読にする
+    thread.markRead();
+  }
+}
+
+/**
+ * LINE Messaging APIを使って複数メッセージを送る関数（画像対応）
+ */
+function sendLineBroadcastAdvanced(messagesArray) {
+  const url = 'https://api.line.me/v2/bot/message/broadcast';
+  try {
+    UrlFetchApp.fetch(url, {
+      'headers': {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'Authorization': 'Bearer ' + LINE_TOKEN, 
+      },
+      'method': 'post',
+      'payload': JSON.stringify({
+        'messages': messagesArray, // 配列をそのまま渡す
+      }),
+    });
+    console.log("LINEに通知と画像を送信しました。");
+  } catch (e) {
+    console.error("LINE送信エラー: " + e.message);
+  }
+}
+
+/**
+ * LINE Messaging APIを使ってメッセージを全員に送る共通関数
+ * ※LINE_TOKENはコード冒頭で定義されているものを使用します
+ */
+function sendLineBroadcast(text) {
+  const url = 'https://api.line.me/v2/bot/message/broadcast';
+  try {
+    UrlFetchApp.fetch(url, {
+      'headers': {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'Authorization': 'Bearer ' + LINE_TOKEN, 
+      },
+      'method': 'post',
+      'payload': JSON.stringify({
+        'messages': [{ 'type': 'text', 'text': text }],
+      }),
+    });
+    console.log("LINEに通知を送信しました: " + text);
+  } catch (e) {
+    console.error("LINE送信エラー: " + e.message);
+  }
+}
